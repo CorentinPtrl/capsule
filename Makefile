@@ -16,7 +16,8 @@ BUILD_DATE      ?= $(shell git log -1 --format="%at" | xargs -I{} sh -c 'if [ "$
 IMG_BASE        ?= $(REPOSITORY)
 IMG             ?= $(IMG_BASE):$(VERSION)
 CAPSULE_IMG     ?= $(REGISTRY)/$(IMG_BASE)
-CLUSTER_NAME    ?= capsule
+KIND_CLUSTER_SUFFIX := $(shell (command -v openssl >/dev/null 2>&1 && openssl rand -hex 4) || head -c 32 /dev/urandom | md5sum | cut -c1-8)
+CLUSTER_NAME        := capsule-$(KIND_CLUSTER_SUFFIX)
 
 ## Kubernetes Version Support
 KUBERNETES_SUPPORTED_VERSION ?= "v1.34.0"
@@ -234,7 +235,7 @@ golint-fix: golangci-lint
 # Running e2e tests in a KinD instance
 .PHONY: e2e
 e2e: ginkgo
-	$(MAKE) e2e-build && $(MAKE) e2e-exec && $(MAKE) e2e-destroy
+	$(MAKE) CLUSTER_NAME=$(CLUSTER_NAME) e2e-build && $(MAKE) CLUSTER_NAME=$(CLUSTER_NAME) e2e-exec && $(MAKE) CLUSTER_NAME=$(CLUSTER_NAME) e2e-destroy
 
 API_GW         := none
 API_GW_VERSION := v1.3.0
@@ -309,7 +310,7 @@ e2e-exec: ginkgo
 
 .PHONY: e2e-destroy
 e2e-destroy: kind
-	$(KIND) delete cluster --name capsule
+	$(KIND) delete cluster --name $(CLUSTER_NAME)dock
 
 SPELL_CHECKER = npx spellchecker-cli
 docs-lint:

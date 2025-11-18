@@ -16,15 +16,15 @@ on:
       - 'main.go'
       - 'Makefile'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   e2e:
     name: E2E Testing
     runs-on:
       labels: ubuntu-latest-8-cores
+    strategy:
+      matrix:
+        run: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+      max-parallel: 100
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
