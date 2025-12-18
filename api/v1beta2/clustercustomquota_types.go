@@ -4,17 +4,13 @@
 package v1beta2
 
 import (
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ClusterCustomQuotaSpec.
 type ClusterCustomQuotaSpec struct {
-	ScopeSelectors []metav1.LabelSelector `json:"scopeSelectors,omitempty"`
-	Selectors      []metav1.LabelSelector `json:"selectors,omitempty"`
-	Limit          resource.Quantity      `json:"limit"`
-	//+kubebuilder:default:={}
-	Source CustomQuotaSpecSource `json:"source,omitzero"`
+	ScopeSelectors  []metav1.LabelSelector `json:"scopeSelectors,omitempty"`
+	CustomQuotaSpec `json:",inline"`
 }
 
 // +kubebuilder:object:root=true

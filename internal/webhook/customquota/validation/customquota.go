@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/types"
 	"slices"
 
 	"github.com/go-logr/logr"
@@ -28,6 +29,11 @@ import (
 type customquotasHandler struct {
 	client client.Client
 	log    logr.Logger
+}
+
+type pair struct {
+	a *capsulev1beta2.CustomQuotaStatus
+	b capsulev1beta2.CustomQuotaSpec
 }
 
 func CustomQuotasHandler(client client.Client, log logr.Logger) capsulewebhook.Handler {
@@ -242,32 +248,74 @@ func (h *customquotasHandler) updateCustomQuota(ctx context.Context, req admissi
 		return nil
 	}
 
-	for _, cq := range customQuotasMatched {
-		claimList := cq.Status.Claims
-		claimList = append(claimList, fmt.Sprintf("%s.%s", req.Namespace, req.Name))
-		cq.Status.Claims = claimList
+	clusterCustomQuotasMatched, err := h.getClusterCustomQuotaMatched(ctx, req, u)
+	if err != nil {
+		h.log.Error(err, fmt.Sprintf("error getting matched CustomQuotas: %v", err))
+		return nil
+	}
 
-		usage, err := customquotas.GetUsageFromUnstructured(u, cq.Spec.Source.Path)
+	cqs := make(map[string]pair)
+	for _, cq := range customQuotasMatched {
+		cqs[cq.Name+"."+cq.Namespace] = pair{
+			a: &cq.Status,
+			b: cq.Spec,
+		}
+	}
+	for _, ccq := range clusterCustomQuotasMatched {
+		cqs[ccq.Name+"."+ccq.Namespace] = pair{
+			a: &ccq.Status,
+			b: ccq.Spec.CustomQuotaSpec,
+		}
+	}
+
+	var modifiedCq []*capsulev1beta2.CustomQuotaStatus
+
+	for name, cq := range cqs {
+		status := cq.a
+		spec := cq.b
+		claimList := status.Claims
+		claimList = append(claimList, fmt.Sprintf("%s.%s", req.Namespace, req.Name))
+		status.Claims = claimList
+
+		usage, err := customquotas.GetUsageFromUnstructured(u, spec.Source.Path)
 		if err != nil {
-			h.log.Error(err, fmt.Sprintf("error getting usage from object for CustomQuota %s: %v", cq.Name, err))
+			h.log.Error(err, fmt.Sprintf("error getting usage from object for CustomQuota %s: %v", name, err))
 
 			continue
 		}
 
-		newUsed := cq.Status.Used.DeepCopy()
+		newUsed := status.Used.DeepCopy()
 		newUsed.Add(resource.MustParse(usage))
 
-		if newUsed.Cmp(cq.Spec.Limit) == 1 {
-			response := admission.Denied(fmt.Sprintf("updating resource exceeds limit for CustomQuota %s", cq.Name))
+		if newUsed.Cmp(spec.Limit) == 1 {
+			response := admission.Denied(fmt.Sprintf("updating resource exceeds limit for CustomQuota %s", name))
 
 			return &response
 		}
 
-		cq.Status.Used.Add(resource.MustParse(usage))
-		cq.Status.Available.Sub(resource.MustParse(usage))
+		status.Used.Add(resource.MustParse(usage))
+		status.Available.Sub(resource.MustParse(usage))
 
-		if err := h.client.Status().Update(ctx, &cq); err != nil {
-			h.log.Error(err, fmt.Sprintf("error updating CustomQuota %s status: %v", cq.Name, err))
+		modifiedCq = append(modifiedCq, status)
+	}
+
+	for _, cq := range customQuotasMatched {
+		for _, modified := range modifiedCq {
+			if &cq.Status == modified {
+				if err := h.client.Status().Update(ctx, &cq); err != nil {
+					h.log.Error(err, fmt.Sprintf("error updating CustomQuota %s status: %v", cq.Name, err))
+				}
+			}
+		}
+	}
+
+	for _, ccq := range clusterCustomQuotasMatched {
+		for _, modified := range modifiedCq {
+			if &ccq.Status == modified {
+				if err := h.client.Status().Update(ctx, &ccq); err != nil {
+					h.log.Error(err, fmt.Sprintf("error updating CustomQuota %s status: %v", ccq.Name, err))
+				}
+			}
 		}
 	}
 	return nil
