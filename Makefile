@@ -307,7 +307,7 @@ trace-install:
 		--set 'manager.resources=null'\
 		--set 'manager.livenessProbe.failureThreshold=10' \
 		--set 'manager.readinessProbe.failureThreshold=10' \
-		--values charts/capsule/ci/tracing-values.yaml \
+		--values charts/capsule/ci/tracing.yaml \
 		capsule \
 		./charts/capsule
 
@@ -318,8 +318,8 @@ trace-e2e: kind
 	$(MAKE) e2e-load-image CLUSTER_NAME=capsule-tracing IMAGE=$(CAPSULE_IMG) VERSION=tracing
 	$(MAKE) trace-install
 	$(MAKE) e2e-install-deps
-	$(MAKE) e2e-exec
-	$(KIND) delete cluster --name capsule-tracing
+#	$(MAKE) e2e-exec
+#	$(KIND) delete cluster --name capsule-tracing
 
 .PHONY: trace-unit
 trace-unit: harpoon

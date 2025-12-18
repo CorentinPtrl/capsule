@@ -1,0 +1,8 @@
+apiVersion: capsule.clastix.io/v1beta2
+kind: Tenant
+metadata:
+  name: gas
+spec:
+  owners:
+  - name: alice
+    kind: User

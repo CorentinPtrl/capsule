@@ -1,0 +1,9 @@
+apiVersion: v1
+data:
+  memory: 800Mi
+kind: ConfigMap
+metadata:
+  name: cm
+  namespace: gas-build
+  labels:
+    foo: bar

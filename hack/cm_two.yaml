@@ -1,0 +1,9 @@
+apiVersion: v1
+data:
+  memory: 200Mi
+kind: ConfigMap
+metadata:
+  name: cm-two
+  namespace: gas-two
+  labels:
+    foo: bar

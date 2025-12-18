@@ -1,0 +1,17 @@
+---
+apiVersion: capsule.clastix.io/v1beta2
+kind: ClusterCustomQuota
+metadata:
+  name: cluster-custom-quota
+spec:
+  source:
+    version: v1
+    kind: ConfigMap
+    path: .data.memory
+  selectors:
+    - matchLabels:
+        capsule.clastix.io/tenant: gas
+  scopeSelectors:
+    - matchLabels:
+          foo: bar
+  limit: 1Gi
