@@ -9,7 +9,7 @@ gomod:
   proxy: false
 builds:
   - id: "{{ .ProjectName }}"
-    main: ./cmd/
+    main: ./cmd/controller
     binary: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
     env:
       - CGO_ENABLED=0

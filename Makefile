@@ -213,7 +213,7 @@ LD_FLAGS        := "-X main.Version=$(VERSION) \
 ko-build-capsule: ko
 	@echo Building Capsule $(KO_TAGS) for $(KO_PLATFORM) >&2
 	@LD_FLAGS=$(LD_FLAGS) KOCACHE=$(KOCACHE) KO_DOCKER_REPO=$(CAPSULE_IMG) \
-		$(KO) build ./cmd/ --bare --tags=$(KO_TAGS) --push=false --local --platform=$(KO_PLATFORM)
+		$(KO) build ./cmd/controller --bare --tags=$(KO_TAGS) --push=false --local --platform=$(KO_PLATFORM)
 
 .PHONY: ko-build-all
 ko-build-all: ko-build-capsule
@@ -239,7 +239,7 @@ ko-login: ko
 .PHONY: ko-publish-capsule
 ko-publish-capsule: ko-login ## Build and publish kyvernopre image (with ko)
 	@LD_FLAGS=$(LD_FLAGS) KOCACHE=$(KOCACHE) KO_DOCKER_REPO=$(CAPSULE_IMG) \
-		$(KO) build ./cmd/ --bare --tags=$(KO_TAGS)
+		$(KO) build ./cmd/controller --bare --tags=$(KO_TAGS)
 
 .PHONY: ko-publish-all
 ko-publish-all: ko-publish-capsule
