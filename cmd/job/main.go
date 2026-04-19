@@ -9,7 +9,6 @@ import (
 	goflag "flag"
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"time"
 
@@ -41,7 +40,6 @@ func main() {
 func run() error {
 	var cfg utilsjob.JobOptions
 
-	var ()
 	flag.StringVar(&cfg.TenantLabelKey, "tenant-label-key", capmeta.TenantLabel, "Namespace label key to read tenant value from (must exist).")
 	flag.Float32Var(&cfg.Qps, "qps", 20, "Client QPS.")
 	flag.IntVar(&cfg.Burst, "burst", 40, "Client burst.")
@@ -54,11 +52,7 @@ func run() error {
 
 	flag.Parse()
 
-	slices.Sort(cfg.TargetLabelKeys)
-	slices.Compact(cfg.TargetLabelKeys)
-
-	slices.Sort(cfg.ExcludeResources)
-	slices.Compact(cfg.ExcludeResources)
+	cfg.Compact()
 
 	if cfg.TenantLabelKey == "" {
 		return fmt.Errorf("tenant-label-key must not be empty")
@@ -132,15 +126,7 @@ func run() error {
 
 		for _, gvr := range namespacedGVRs {
 			ul, err := dc.Resource(gvr).Namespace(ns.Name).List(ctx, metav1.ListOptions{})
-			if err != nil {
-				if utils.IsUnsupportedAPI(err) {
-					continue
-				}
-
-				continue
-			}
-
-			if len(ul.Items) == 0 {
+			if err != nil || len(ul.Items) == 0 {
 				continue
 			}
 
@@ -280,6 +266,5 @@ func listNamespacesWithLabelKey(ctx context.Context, c crclient.Client, key stri
 			}},
 		},
 	}
-
 	return selector.GetMatchingNamespaces(ctx, c)
 }
