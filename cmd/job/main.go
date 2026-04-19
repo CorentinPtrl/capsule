@@ -1,97 +1,81 @@
+// Copyright 2020-2025 Project Capsule Authors
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"flag"
+	goflag "flag"
 	"fmt"
 	"log"
 	"slices"
 	"strings"
 	"time"
 
+	flag "github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	capmeta "github.com/projectcapsule/capsule/pkg/api/meta"
+	apimisc "github.com/projectcapsule/capsule/pkg/api/misc"
+	"github.com/projectcapsule/capsule/pkg/utils"
 )
 
-type config struct {
+type jobConfig struct {
 	tenantLabelKey   string
 	targetLabelKeys  []string
 	extraLabels      map[string]string
-	excludeResources sets.Set[string] // resource names like "events", "rolebindings"
+	excludeResources sets.Set[string]
 	qps              float32
 	burst            int
 	timeout          time.Duration
 }
 
-// stringSliceFlag supports repeated flags: --x a --x b
-type stringSliceFlag []string
-
-func (s *stringSliceFlag) String() string {
-	if s == nil {
-		return ""
-	}
-	return strings.Join(*s, ",")
-}
-
-func (s *stringSliceFlag) Set(v string) error {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return nil
-	}
-	*s = append(*s, v)
-	return nil
-}
-
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	var (
-		tenantKey  = flag.String("tenant-label-key", capmeta.TenantLabel, "Namespace label key to read tenant value from (must exist).")
-		qps        = flag.Float64("qps", 20, "Client QPS.")
-		burst      = flag.Int("burst", 40, "Client burst.")
-		kubeconfig = flag.String("kubeconfig", "", "Path to kubeconfig (optional; if empty uses in-cluster).")
-		timeout    = flag.Duration("timeout", 2*time.Minute, "Overall timeout for the run.")
+		tenantKey = flag.String("tenant-label-key", capmeta.TenantLabel, "Namespace label key to read tenant value from (must exist).")
+		qps       = flag.Float64("qps", 20, "Client QPS.")
+		burst     = flag.Int("burst", 40, "Client burst.")
+		timeout   = flag.Duration("timeout", 2*time.Minute, "Overall timeout for the run.")
 	)
 
-	targetKeys := stringSliceFlag{
-		capmeta.ManagedByCapsuleLabel,
-		capmeta.TenantLabel,
-	}
+	targetKeys := []string{capmeta.ManagedByCapsuleLabel, capmeta.TenantLabel}
+	extraLabelArgs := []string{}
+	excludeArgs := []string{"events", "events.events.k8s.io"}
 
-	extraLabelArgs := stringSliceFlag{}
-	excludeArgs := stringSliceFlag{
-		"events",
-		"events.events.k8s.io",
-	}
-
-	flag.Var(&targetKeys, "target-label-key", "Label key to set tenant value on (repeatable). Example: --target-label-key a --target-label-key b")
-	flag.Var(&extraLabelArgs, "extra-label", "Extra label to set (key=value) (repeatable). Example: --extra-label a=b --extra-label c=d")
-	flag.Var(&excludeArgs, "exclude-resource", "Resource name to skip (repeatable). Example: --exclude-resource events --exclude-resource rolebindings")
+	flag.StringArrayVar(&targetKeys, "target-label-key", targetKeys, "Label key to set tenant value on (repeatable). Example: --target-label-key a --target-label-key b")
+	flag.StringArrayVar(&extraLabelArgs, "extra-label", extraLabelArgs, "Extra label to set (key=value) (repeatable). Example: --extra-label a=b --extra-label c=d")
+	flag.StringArrayVar(&excludeArgs, "exclude-resource", excludeArgs, "Resource name to skip (repeatable). Example: --exclude-resource events --exclude-resource rolebindings")
+	config.RegisterFlags(goflag.CommandLine)
+	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 
 	flag.Parse()
 
-	targetKeysArr := []string(targetKeys)
-
+	targetKeysArr := targetKeys
 	slices.Sort(targetKeysArr)
 	slices.Compact(targetKeysArr)
 
-	excludeArgsArr := []string(excludeArgs)
-
+	excludeArgsArr := excludeArgs
 	slices.Sort(excludeArgsArr)
 	slices.Compact(excludeArgsArr)
 
-	cfg := config{
+	cfg := jobConfig{
 		tenantLabelKey:   *tenantKey,
 		targetLabelKeys:  targetKeysArr,
 		extraLabels:      parseLabelsFromArgs([]string(extraLabelArgs)),
@@ -102,62 +86,68 @@ func main() {
 	}
 
 	if cfg.tenantLabelKey == "" {
-		log.Fatalf("tenant-label-key must not be empty")
-	}
-	if len(cfg.targetLabelKeys) == 0 {
-		log.Fatalf("at least one target label key must be provided (use --target-label-key)")
+		return fmt.Errorf("tenant-label-key must not be empty")
 	}
 
-	restCfg, err := buildRESTConfig(*kubeconfig)
-	if err != nil {
-		log.Fatalf("build config: %v", err)
+	if len(cfg.targetLabelKeys) == 0 {
+		return fmt.Errorf("at least one target label key must be provided (use --target-label-key)")
 	}
+
+	restCfg, err := config.GetConfig()
+	if err != nil {
+		return fmt.Errorf("build jobConfig: %w", err)
+	}
+
 	restCfg.QPS = cfg.qps
 	restCfg.Burst = cfg.burst
 
-	ctx := context.Background()
-	if cfg.timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cfg.timeout)
-		defer cancel()
+	ctx, cancel := buildContext(cfg.timeout)
+	defer cancel()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("scheme: %w", err)
 	}
 
-	clientset, err := kubernetes.NewForConfig(restCfg)
+	crCli, err := crclient.New(restCfg, crclient.Options{Scheme: scheme})
 	if err != nil {
-		log.Fatalf("clientset: %v", err)
+		return fmt.Errorf("client: %w", err)
 	}
+
 	dc, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
-		log.Fatalf("dynamic: %v", err)
+		return fmt.Errorf("dynamic: %w", err)
 	}
+
 	disc, err := discovery.NewDiscoveryClientForConfig(restCfg)
 	if err != nil {
-		log.Fatalf("discovery: %v", err)
+		return fmt.Errorf("discovery: %w", err)
 	}
 
-	namespaces, err := listNamespacesWithLabelKey(ctx, clientset, cfg.tenantLabelKey)
+	namespaces, err := listNamespacesWithLabelKey(ctx, crCli, cfg.tenantLabelKey)
 	if err != nil {
-		log.Fatalf("list namespaces: %v", err)
+		return fmt.Errorf("list namespaces: %w", err)
 	}
+
 	if len(namespaces) == 0 {
 		fmt.Printf("No namespaces found with label key %q. Done.\n", cfg.tenantLabelKey)
-		return
+
+		return nil
 	}
 
-	// Discover namespaced resources once
 	namespacedGVRs, err := discoverNamespacedResources(disc, cfg.excludeResources)
 	if err != nil {
-		log.Fatalf("discover resources: %v", err)
+		return fmt.Errorf("discover resources: %w", err)
 	}
 
 	fmt.Printf("Found %d namespaces with %q\n", len(namespaces), cfg.tenantLabelKey)
 	fmt.Printf("Discovered %d namespaced resource types (after exclusions)\n", len(namespacedGVRs))
 
-	// Apply labels
 	for _, ns := range namespaces {
 		tenantVal := ns.Labels[cfg.tenantLabelKey]
 		if strings.TrimSpace(tenantVal) == "" {
 			fmt.Printf("WARN: namespace %q has empty %q; skipping\n", ns.Name, cfg.tenantLabelKey)
+
 			continue
 		}
 
@@ -165,18 +155,20 @@ func main() {
 
 		fmt.Printf("\n== Namespace: %s (%s=%s) ==\n", ns.Name, cfg.tenantLabelKey, tenantVal)
 
-		// Label all resources in namespace
 		for _, gvr := range namespacedGVRs {
 			ul, err := dc.Resource(gvr).Namespace(ns.Name).List(ctx, metav1.ListOptions{})
 			if err != nil {
-				// RBAC forbidden or resource not served in this cluster, etc.
+				if utils.IsUnsupportedAPI(err) {
+					continue
+				}
+
 				continue
 			}
+
 			if len(ul.Items) == 0 {
 				continue
 			}
 
-			// Patch each object (bounded retry for conflicts)
 			for i := range ul.Items {
 				name := ul.Items[i].GetName()
 
@@ -187,13 +179,13 @@ func main() {
 					Steps:    4,
 				}, func() (bool, error) {
 					if err := patchLabels(ctx, dc, gvr, ns.Name, name, desired); err != nil {
-						// Some dynamic errors are effectively "skip".
-						if meta.IsNoMatchError(err) {
+						if utils.IsUnsupportedAPI(err) {
 							return true, nil
 						}
-						// Retry on other errors (notably conflicts / transient apiserver issues)
+
 						return false, nil
 					}
+
 					return true, nil
 				})
 				if err != nil {
@@ -204,69 +196,46 @@ func main() {
 	}
 
 	fmt.Println("\nDone.")
+
+	return nil
 }
 
-func buildRESTConfig(kubeconfig string) (*rest.Config, error) {
-	// 1. If explicitly provided → use it
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+func buildContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.Background(), func() {}
 	}
 
-	// 2. Try default kubeconfig (local dev)
-	if cfg, err := clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile); err == nil {
-		return cfg, nil
-	}
-
-	// 3. Fallback to in-cluster
-	return rest.InClusterConfig()
-}
-
-func listNamespacesWithLabelKey(ctx context.Context, cs *kubernetes.Clientset, key string) ([]corev1.Namespace, error) {
-	// Label selector that checks existence: "key" means "exists".
-	nsl, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: key})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]corev1.Namespace, 0, len(nsl.Items))
-	for i := range nsl.Items {
-		out = append(out, nsl.Items[i])
-	}
-	return out, nil
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func discoverNamespacedResources(disc discovery.DiscoveryInterface, exclude sets.Set[string]) ([]schema.GroupVersionResource, error) {
 	rl, err := disc.ServerPreferredResources()
 	if err != nil {
-		if rl == nil {
+		if rl == nil || !utils.IsUnsupportedAPI(err) {
 			return nil, err
 		}
 	}
 
 	var gvrs []schema.GroupVersionResource
-	seen := sets.New[string]()
 
 	for _, r := range rl {
 		gv, err := schema.ParseGroupVersion(r.GroupVersion)
 		if err != nil {
 			continue
 		}
+
 		for _, res := range r.APIResources {
 			if !res.Namespaced {
 				continue
 			}
-			// Skip subresources (contain '/')
+
 			if strings.Contains(res.Name, "/") {
 				continue
 			}
-			// Exclude by resource name
+
 			if exclude.Has(res.Name) {
 				continue
 			}
-			key := gv.String() + "/" + res.Name
-			if seen.Has(key) {
-				continue
-			}
-			seen.Insert(key)
 
 			gvrs = append(gvrs, schema.GroupVersionResource{
 				Group:    gv.Group,
@@ -279,14 +248,17 @@ func discoverNamespacedResources(disc discovery.DiscoveryInterface, exclude sets
 	return gvrs, nil
 }
 
-func buildDesiredLabels(cfg config, tenantValue string) map[string]string {
+func buildDesiredLabels(cfg jobConfig, tenantValue string) map[string]string {
 	out := make(map[string]string, len(cfg.targetLabelKeys)+len(cfg.extraLabels))
+
 	for _, k := range cfg.targetLabelKeys {
 		out[k] = tenantValue
 	}
+
 	for k, v := range cfg.extraLabels {
 		out[k] = v
 	}
+
 	return out
 }
 
@@ -298,17 +270,15 @@ func patchLabels(
 	name string,
 	labels map[string]string,
 ) error {
-	// Use JSON merge patch with json.Marshal to avoid manual JSON construction.
 	type metadata struct {
 		Labels map[string]string `json:"labels,omitempty"`
 	}
+
 	type patch struct {
 		Metadata metadata `json:"metadata"`
 	}
 
-	b, err := json.Marshal(patch{
-		Metadata: metadata{Labels: labels},
-	})
+	b, err := json.Marshal(patch{Metadata: metadata{Labels: labels}})
 	if err != nil {
 		return err
 	}
@@ -321,22 +291,39 @@ func patchLabels(
 	}
 
 	_, err = ri.Patch(ctx, name, types.MergePatchType, b, metav1.PatchOptions{})
+
 	return err
 }
 
 func parseLabelsFromArgs(args []string) map[string]string {
 	out := map[string]string{}
+
 	for _, kv := range args {
 		i := strings.Index(kv, "=")
 		if i <= 0 {
-			// skip invalid input for safety
 			continue
 		}
+
 		k := strings.TrimSpace(kv[:i])
 		v := strings.TrimSpace(kv[i+1:])
+
 		if k != "" {
 			out[k] = v
 		}
 	}
+
 	return out
+}
+
+func listNamespacesWithLabelKey(ctx context.Context, c crclient.Client, key string) ([]corev1.Namespace, error) {
+	selector := &apimisc.NamespaceSelector{
+		LabelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      key,
+				Operator: metav1.LabelSelectorOpExists,
+			}},
+		},
+	}
+
+	return selector.GetMatchingNamespaces(ctx, c)
 }
