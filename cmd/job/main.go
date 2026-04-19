@@ -26,20 +26,11 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	utilsjob "github.com/projectcapsule/capsule/internal/job/utils"
 	capmeta "github.com/projectcapsule/capsule/pkg/api/meta"
 	apimisc "github.com/projectcapsule/capsule/pkg/api/misc"
 	"github.com/projectcapsule/capsule/pkg/utils"
 )
-
-type jobConfig struct {
-	tenantLabelKey   string
-	targetLabelKeys  []string
-	extraLabels      map[string]string
-	excludeResources sets.Set[string]
-	qps              float32
-	burst            int
-	timeout          time.Duration
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -48,48 +39,32 @@ func main() {
 }
 
 func run() error {
-	var (
-		tenantKey = flag.String("tenant-label-key", capmeta.TenantLabel, "Namespace label key to read tenant value from (must exist).")
-		qps       = flag.Float64("qps", 20, "Client QPS.")
-		burst     = flag.Int("burst", 40, "Client burst.")
-		timeout   = flag.Duration("timeout", 2*time.Minute, "Overall timeout for the run.")
-	)
+	var cfg utilsjob.JobOptions
 
-	targetKeys := []string{capmeta.ManagedByCapsuleLabel, capmeta.TenantLabel}
-	extraLabelArgs := []string{}
-	excludeArgs := []string{"events", "events.events.k8s.io"}
-
-	flag.StringArrayVar(&targetKeys, "target-label-key", targetKeys, "Label key to set tenant value on (repeatable). Example: --target-label-key a --target-label-key b")
-	flag.StringArrayVar(&extraLabelArgs, "extra-label", extraLabelArgs, "Extra label to set (key=value) (repeatable). Example: --extra-label a=b --extra-label c=d")
-	flag.StringArrayVar(&excludeArgs, "exclude-resource", excludeArgs, "Resource name to skip (repeatable). Example: --exclude-resource events --exclude-resource rolebindings")
+	var ()
+	flag.StringVar(&cfg.TenantLabelKey, "tenant-label-key", capmeta.TenantLabel, "Namespace label key to read tenant value from (must exist).")
+	flag.Float32Var(&cfg.Qps, "qps", 20, "Client QPS.")
+	flag.IntVar(&cfg.Burst, "burst", 40, "Client burst.")
+	flag.DurationVar(&cfg.Timeout, "timeout", 2*time.Minute, "Overall timeout for the run.")
+	flag.StringArrayVar(&cfg.TargetLabelKeys, "target-label-key", []string{capmeta.ManagedByCapsuleLabel, capmeta.TenantLabel}, "Label key to set tenant value on (repeatable). Example: --target-label-key a --target-label-key b")
+	flag.StringToStringVar(&cfg.ExtraLabels, "extra-label", map[string]string{}, "Extra label to set (key=value) (repeatable). Example: --extra-label a=b --extra-label c=d")
+	flag.StringArrayVar(&cfg.ExcludeResources, "exclude-resource", []string{"events", "events.events.k8s.io"}, "Resource name to skip (repeatable). Example: --exclude-resource events --exclude-resource rolebindings")
 	config.RegisterFlags(goflag.CommandLine)
 	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 
 	flag.Parse()
 
-	targetKeysArr := targetKeys
-	slices.Sort(targetKeysArr)
-	slices.Compact(targetKeysArr)
+	slices.Sort(cfg.TargetLabelKeys)
+	slices.Compact(cfg.TargetLabelKeys)
 
-	excludeArgsArr := excludeArgs
-	slices.Sort(excludeArgsArr)
-	slices.Compact(excludeArgsArr)
+	slices.Sort(cfg.ExcludeResources)
+	slices.Compact(cfg.ExcludeResources)
 
-	cfg := jobConfig{
-		tenantLabelKey:   *tenantKey,
-		targetLabelKeys:  targetKeysArr,
-		extraLabels:      parseLabelsFromArgs([]string(extraLabelArgs)),
-		excludeResources: sets.New[string](excludeArgsArr...),
-		qps:              float32(*qps),
-		burst:            *burst,
-		timeout:          *timeout,
-	}
-
-	if cfg.tenantLabelKey == "" {
+	if cfg.TenantLabelKey == "" {
 		return fmt.Errorf("tenant-label-key must not be empty")
 	}
 
-	if len(cfg.targetLabelKeys) == 0 {
+	if len(cfg.TargetLabelKeys) == 0 {
 		return fmt.Errorf("at least one target label key must be provided (use --target-label-key)")
 	}
 
@@ -98,10 +73,10 @@ func run() error {
 		return fmt.Errorf("build jobConfig: %w", err)
 	}
 
-	restCfg.QPS = cfg.qps
-	restCfg.Burst = cfg.burst
+	restCfg.QPS = cfg.Qps
+	restCfg.Burst = cfg.Burst
 
-	ctx, cancel := buildContext(cfg.timeout)
+	ctx, cancel := buildContext(cfg.Timeout)
 	defer cancel()
 
 	scheme := runtime.NewScheme()
@@ -124,36 +99,36 @@ func run() error {
 		return fmt.Errorf("discovery: %w", err)
 	}
 
-	namespaces, err := listNamespacesWithLabelKey(ctx, crCli, cfg.tenantLabelKey)
+	namespaces, err := listNamespacesWithLabelKey(ctx, crCli, cfg.TenantLabelKey)
 	if err != nil {
 		return fmt.Errorf("list namespaces: %w", err)
 	}
 
 	if len(namespaces) == 0 {
-		fmt.Printf("No namespaces found with label key %q. Done.\n", cfg.tenantLabelKey)
+		fmt.Printf("No namespaces found with label key %q. Done.\n", cfg.TenantLabelKey)
 
 		return nil
 	}
 
-	namespacedGVRs, err := discoverNamespacedResources(disc, cfg.excludeResources)
+	namespacedGVRs, err := discoverNamespacedResources(disc, cfg.ExcludeResources)
 	if err != nil {
 		return fmt.Errorf("discover resources: %w", err)
 	}
 
-	fmt.Printf("Found %d namespaces with %q\n", len(namespaces), cfg.tenantLabelKey)
+	fmt.Printf("Found %d namespaces with %q\n", len(namespaces), cfg.TenantLabelKey)
 	fmt.Printf("Discovered %d namespaced resource types (after exclusions)\n", len(namespacedGVRs))
 
 	for _, ns := range namespaces {
-		tenantVal := ns.Labels[cfg.tenantLabelKey]
+		tenantVal := ns.Labels[cfg.TenantLabelKey]
 		if strings.TrimSpace(tenantVal) == "" {
-			fmt.Printf("WARN: namespace %q has empty %q; skipping\n", ns.Name, cfg.tenantLabelKey)
+			fmt.Printf("WARN: namespace %q has empty %q; skipping\n", ns.Name, cfg.TenantLabelKey)
 
 			continue
 		}
 
 		desired := buildDesiredLabels(cfg, tenantVal)
 
-		fmt.Printf("\n== Namespace: %s (%s=%s) ==\n", ns.Name, cfg.tenantLabelKey, tenantVal)
+		fmt.Printf("\n== Namespace: %s (%s=%s) ==\n", ns.Name, cfg.TenantLabelKey, tenantVal)
 
 		for _, gvr := range namespacedGVRs {
 			ul, err := dc.Resource(gvr).Namespace(ns.Name).List(ctx, metav1.ListOptions{})
@@ -208,7 +183,8 @@ func buildContext(timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), timeout)
 }
 
-func discoverNamespacedResources(disc discovery.DiscoveryInterface, exclude sets.Set[string]) ([]schema.GroupVersionResource, error) {
+func discoverNamespacedResources(disc discovery.DiscoveryInterface, exclude []string) ([]schema.GroupVersionResource, error) {
+	excludeSet := sets.New(exclude...)
 	rl, err := disc.ServerPreferredResources()
 	if err != nil {
 		if rl == nil || !utils.IsUnsupportedAPI(err) {
@@ -233,7 +209,7 @@ func discoverNamespacedResources(disc discovery.DiscoveryInterface, exclude sets
 				continue
 			}
 
-			if exclude.Has(res.Name) {
+			if excludeSet.Has(res.Name) {
 				continue
 			}
 
@@ -248,14 +224,14 @@ func discoverNamespacedResources(disc discovery.DiscoveryInterface, exclude sets
 	return gvrs, nil
 }
 
-func buildDesiredLabels(cfg jobConfig, tenantValue string) map[string]string {
-	out := make(map[string]string, len(cfg.targetLabelKeys)+len(cfg.extraLabels))
+func buildDesiredLabels(cfg utilsjob.JobOptions, tenantValue string) map[string]string {
+	out := make(map[string]string, len(cfg.TargetLabelKeys)+len(cfg.ExtraLabels))
 
-	for _, k := range cfg.targetLabelKeys {
+	for _, k := range cfg.TargetLabelKeys {
 		out[k] = tenantValue
 	}
 
-	for k, v := range cfg.extraLabels {
+	for k, v := range cfg.ExtraLabels {
 		out[k] = v
 	}
 
@@ -293,26 +269,6 @@ func patchLabels(
 	_, err = ri.Patch(ctx, name, types.MergePatchType, b, metav1.PatchOptions{})
 
 	return err
-}
-
-func parseLabelsFromArgs(args []string) map[string]string {
-	out := map[string]string{}
-
-	for _, kv := range args {
-		i := strings.Index(kv, "=")
-		if i <= 0 {
-			continue
-		}
-
-		k := strings.TrimSpace(kv[:i])
-		v := strings.TrimSpace(kv[i+1:])
-
-		if k != "" {
-			out[k] = v
-		}
-	}
-
-	return out
 }
 
 func listNamespacesWithLabelKey(ctx context.Context, c crclient.Client, key string) ([]corev1.Namespace, error) {
